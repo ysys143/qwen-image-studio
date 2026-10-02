@@ -6,16 +6,19 @@ import {
   DownloadIcon,
   ImageIcon,
   ImagePlusIcon,
+  Loader2Icon,
   MoreHorizontalIcon,
   PencilLineIcon,
   RefreshCwIcon,
   SearchIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
   SquareIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,6 +42,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ImageDialog } from "@/components/image-dialog";
 import { imageUrl } from "@/lib/client-api";
 import { truncate } from "@/lib/format";
@@ -52,20 +64,102 @@ interface Props {
   loaded: boolean;
   onDelete: (ids: string[]) => void;
   onLoadParams: (params: GenerationParams) => void;
-  onRegenerate: (params: GenerationParams, keepSeed: boolean) => void;
+  /** 실패한 작업을 같은 설정으로 다시 시도한다. 새 작업 id 를 돌려주면 카드에 재시도 중임을 표시한다. */
+  onRegenerate: (params: GenerationParams, keepSeed: boolean) => Promise<string | undefined> | void;
+  /** 지금 실행·대기 중인 작업 id. 재시도한 뒤 진행 중임을 카드에서 알아보기 위한 힌트로 쓴다. */
+  activeJobIds: string[];
+  /** 서버가 자동 재시도로 대기열에 되돌린 작업 id. 갤러리 카드에 "재시도 중"으로 표시한다. */
+  retryingJobIds: string[];
   /** 선택한 이미지들을 현재 참조 목록에 덧붙인다 */
   onAddReferences: (jobs: Job[]) => void;
   /** 이 이미지 한 장을 참조로 삼아 편집을 시작한다 */
   onEditImage: (job: Job) => void;
+  /** 선택 이미지와 프롬프트의 모든 조합을 대기열에 추가한다 */
+  onQueuePromptMatrix: (jobs: Job[], prompts: string[]) => Promise<void>;
+  /** 서버에서 작업 목록과 엔진 상태를 다시 불러온다 */
+  onRefresh: () => void;
 }
 
-export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, onAddReferences, onEditImage }: Props) {
+export function Gallery({
+  jobs,
+  loaded,
+  onDelete,
+  onLoadParams,
+  onRegenerate,
+  activeJobIds,
+  retryingJobIds,
+  onAddReferences,
+  onEditImage,
+  onQueuePromptMatrix,
+  onRefresh,
+}: Props) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [openId, setOpenId] = useState<string | null>(null);
   const [confirmIds, setConfirmIds] = useState<string[] | null>(null);
+  const [promptMatrixOpen, setPromptMatrixOpen] = useState(false);
+  const [promptMatrixText, setPromptMatrixText] = useState("");
+  const [queueingPromptMatrix, setQueueingPromptMatrix] = useState(false);
+  const [retryingIds, setRetryingIds] = useState<Record<string, string>>({});
+  const [refreshing, setRefreshing] = useState(false);
+  const seenActive = useRef<Set<string>>(new Set());
+
+  /** 새로고침 버튼이 최소한 잠깐은 회전을 보여주도록 감싼다. */
+  const doRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.resolve(onRefresh());
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    } finally {
+      setRefreshing(false);
+    }
+  }, [onRefresh]);
+
+  const activeSet = useMemo(() => new Set(activeJobIds), [activeJobIds]);
+  const retryingSet = useMemo(() => new Set(retryingJobIds), [retryingJobIds]);
+
+  // 재시도한 작업이 실행을 마치면 카드의 "재시도 중" 표시를 지운다.
+  useEffect(() => {
+    setRetryingIds((prev) => {
+      const entries = Object.entries(prev);
+      if (entries.length === 0) return prev;
+      let changed = false;
+      const next = { ...prev };
+      for (const [oldId, newId] of entries) {
+        if (activeSet.has(newId)) seenActive.current.add(newId);
+        else if (seenActive.current.has(newId)) {
+          delete next[oldId];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeSet]);
+
+  /**
+   * 실패한 작업을 다시 시도한다. 화면은 갤러리에 그대로 두고, 카드에 재시도 중임을 표시하며 스크롤 위치를 보존한다.
+   */
+  const retry = useCallback(
+    async (job: Job) => {
+      const y = window.scrollY;
+      // 요청이 오가는 동안에도 버튼에 재시도 중임을 바로 보여준다.
+      setRetryingIds((prev) => ({ ...prev, [job.id]: "pending" }));
+      const newId = await onRegenerate(job.params, true);
+      setRetryingIds((prev) => {
+        if (typeof newId !== "string") {
+          const next = { ...prev };
+          delete next[job.id];
+          return next;
+        }
+        return { ...prev, [job.id]: newId };
+      });
+      // 화면을 갤러리에 그대로 두고 스크롤 위치를 되돌린다.
+      requestAnimationFrame(() => window.scrollTo({ top: y }));
+    },
+    [onRegenerate],
+  );
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -107,6 +201,25 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
     () => visible.filter((j) => j.status === "done" && selected.has(j.id)),
     [visible, selected],
   );
+  const promptVariants = useMemo(
+    () => promptMatrixText.split(/\r?\n/).map((prompt) => prompt.trim()).filter(Boolean),
+    [promptMatrixText],
+  );
+
+  const queuePromptMatrix = async () => {
+    if (selectedDone.length === 0 || promptVariants.length === 0 || queueingPromptMatrix) return;
+    setQueueingPromptMatrix(true);
+    try {
+      await onQueuePromptMatrix(selectedDone, promptVariants);
+      setPromptMatrixOpen(false);
+      setPromptMatrixText("");
+      exitSelectMode();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "프롬프트 조합을 대기열에 추가하지 못했습니다");
+    } finally {
+      setQueueingPromptMatrix(false);
+    }
+  };
 
   const downloadSelected = () => {
     if (selectedDone.length === 0) return;
@@ -154,6 +267,16 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
               </TabsTrigger>
             </TabsList>
           </Tabs>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={refreshing}
+            title="서버에서 작업 목록과 상태를 다시 불러옵니다"
+            onClick={() => void doRefresh()}
+          >
+            <RefreshCwIcon data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />
+            새로고침
+          </Button>
           {selectMode ? (
             <>
               <Button
@@ -192,6 +315,16 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
               >
                 <ImagePlusIcon data-icon="inline-start" />
                 {selectedDone.length > 0 ? `${selectedDone.length}장 ` : ""}참조로 추가
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={selectedDone.length === 0 || queueingPromptMatrix}
+                onClick={() => setPromptMatrixOpen(true)}
+                title="선택한 각 이미지에 프롬프트 목록을 하나씩 적용합니다"
+              >
+                <SparklesIcon data-icon="inline-start" />
+                프롬프트 조합
               </Button>
               <Button
                 variant="destructive"
@@ -267,12 +400,20 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
                     <Checkbox checked={isSelected} onCheckedChange={() => toggleSelected(job.id)} className="absolute top-2 left-2 bg-background" />
                   ) : null}
                   <div className="flex items-center gap-1.5 text-muted-foreground">
-                    {job.status === "failed" ? (
+                    {job.id in retryingIds || retryingSet.has(job.id) ? (
+                      <Loader2Icon className="size-3.5 animate-spin text-amber-600" />
+                    ) : job.status === "failed" ? (
                       <TriangleAlertIcon className="size-3.5 text-destructive" />
                     ) : (
                       <BanIcon className="size-3.5" />
                     )}
-                    <span className="font-medium">{job.status === "failed" ? "실패" : "취소됨"}</span>
+                    <span className="font-medium">
+                      {job.id in retryingIds || retryingSet.has(job.id)
+                        ? "재시도 중"
+                        : job.status === "failed"
+                          ? "실패"
+                          : "취소됨"}
+                    </span>
                     <span className="ml-auto tabular-nums">시드 {p.seed}</span>
                   </div>
                   <p className="line-clamp-3 leading-snug" title={p.prompt}>
@@ -285,9 +426,18 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
                   ) : null}
                   {!selectMode ? (
                     <div className="mt-auto flex gap-1.5">
-                      <Button size="xs" variant="outline" onClick={() => onRegenerate(p, true)}>
-                        <RefreshCwIcon data-icon="inline-start" />
-                        다시 시도
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={job.id in retryingIds || retryingSet.has(job.id)}
+                        onClick={() => void retry(job)}
+                      >
+                        {job.id in retryingIds || retryingSet.has(job.id) ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <RefreshCwIcon data-icon="inline-start" />
+                        )}
+                        {job.id in retryingIds || retryingSet.has(job.id) ? "재시도 중" : "다시 시도"}
                       </Button>
                       <Button size="xs" variant="ghost" onClick={() => setConfirmIds([job.id])}>
                         <Trash2Icon data-icon="inline-start" />
@@ -378,9 +528,9 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
                           <SlidersHorizontalIcon />
                           설정 불러오기
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => onRegenerate(p, true)}>
-                          <RefreshCwIcon />
-                          같은 시드로 재생성
+                        <DropdownMenuItem disabled={job.id in retryingIds} onClick={() => void retry(job)}>
+                          {job.id in retryingIds ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                          {job.id in retryingIds ? "재시도 중" : "같은 시드로 재생성"}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => onRegenerate(p, false)}>
                           <RefreshCwIcon />
@@ -447,6 +597,36 @@ export function Gallery({ jobs, loaded, onDelete, onLoadParams, onRegenerate, on
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={promptMatrixOpen} onOpenChange={(open) => !queueingPromptMatrix && setPromptMatrixOpen(open)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>선택 이미지에 여러 프롬프트 적용</DialogTitle>
+            <DialogDescription>
+              프롬프트를 한 줄에 하나씩 입력하세요. 선택한 {selectedDone.length}장 각각에 모든 프롬프트를 적용해 이미지별 순서로 대기열에 추가합니다.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={promptMatrixText}
+            onChange={(event) => setPromptMatrixText(event.target.value)}
+            placeholder={"예시:\n따뜻한 봄날의 공원\n비 오는 밤의 네온 거리\n수채화 풍경"}
+            rows={8}
+            disabled={queueingPromptMatrix}
+            aria-label="적용할 프롬프트 목록"
+          />
+          <p className="text-xs text-muted-foreground">
+            {selectedDone.length}장 × {promptVariants.length}개 프롬프트 = {selectedDone.length * promptVariants.length}개 작업
+          </p>
+          <DialogFooter>
+            <Button variant="outline" disabled={queueingPromptMatrix} onClick={() => setPromptMatrixOpen(false)}>
+              취소
+            </Button>
+            <Button disabled={queueingPromptMatrix || promptVariants.length === 0} onClick={() => void queuePromptMatrix()}>
+              {queueingPromptMatrix ? "이미지 준비 중…" : `${selectedDone.length * promptVariants.length}개 작업 대기`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

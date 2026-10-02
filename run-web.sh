@@ -15,6 +15,9 @@ cd "$(dirname "$0")/web"
 export PORT="${PORT:-3210}"
 MODE="${1:-start}"
 
+# macOS 기본 soft limit(256)은 파일 업로드와 SSE 연결이 몰릴 때 부족하다.
+ulimit -n 65536 2>/dev/null || true
+
 # npm 을 거치지 않고 next 를 직접 실행한다. npm 래퍼가 끼면 Ctrl+C 신호가 제대로 전달되지 않거나
 # next-server 가 끝난 뒤에도 npm 프로세스가 남을 수 있다.
 NEXT="./node_modules/.bin/next"

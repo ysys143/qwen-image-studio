@@ -130,6 +130,11 @@ export function ActiveJobs({ jobs, previews, onCancel }: Props) {
                       시드 {p.seed}
                     </Badge>
                     {p.references?.length ? <Badge variant="secondary">편집 · 참조 {p.references.length}장</Badge> : null}
+                    {job.attempts && job.attempts > 0 ? (
+                      <Badge variant="outline" className="tabular-nums">
+                        재시도 · {job.attempts}번째 시도
+                      </Badge>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-col gap-1.5">

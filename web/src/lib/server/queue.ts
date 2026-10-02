@@ -2,6 +2,7 @@ import type { EngineStatus, Job, JobProgress } from "@/lib/types";
 import { CancelledError, comfy } from "./comfy";
 import { publish } from "./events";
 import { mfluxAvailable, runMflux } from "./mflux";
+import { MAX_ATTEMPTS, retryDelayMs } from "./retry";
 import { store } from "./store";
 
 type ProgressUpdate = Partial<JobProgress> & { promptId?: string };
@@ -11,12 +12,13 @@ class Worker {
   private cancelFns = new Map<string, () => Promise<void>>();
   private timing = new Map<string, { samplingStartedAt: number; firstStep: number }>();
   private kicking = false;
+  private retryTimers = new Map<string, NodeJS.Timeout>();
 
   kick(): void {
     if (this.runningId || this.kicking) return;
     const next = store
       .list()
-      .filter((j) => j.status === "queued")
+      .filter((j) => j.status === "queued" && !(j.retryAt && j.retryAt > Date.now()))
       .sort((a, b) => a.createdAt - b.createdAt)[0];
     if (!next) return;
     this.kicking = true;
@@ -30,6 +32,7 @@ class Worker {
     this.runningId = job.id;
     job.status = "running";
     job.startedAt = Date.now();
+    job.retryAt = undefined;
     job.progress = { step: 0, total: job.params.steps, phase: "starting" };
     store.upsert(job);
     void publishEngineStatus();
@@ -50,12 +53,31 @@ class Worker {
       });
     } catch (err) {
       const cancelled = err instanceof CancelledError;
-      store.patch(job.id, (j) => {
-        j.status = cancelled ? "cancelled" : "failed";
-        j.error = cancelled ? undefined : err instanceof Error ? err.message : String(err);
-        j.finishedAt = Date.now();
-      });
-      if (!cancelled) console.error(`[worker] 작업 ${job.id} 실패:`, err);
+      if (cancelled) {
+        store.patch(job.id, (j) => {
+          j.status = "cancelled";
+          j.error = undefined;
+          j.finishedAt = Date.now();
+        });
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        // attempts 는 실제로 실패한 횟수다. 서버 재시작으로 끊긴 실행은 세지 않는다.
+        const failedAttempts = (job.attempts ?? 0) + 1;
+        store.patch(job.id, (j) => {
+          j.attempts = failedAttempts;
+        });
+        if (failedAttempts < MAX_ATTEMPTS) {
+          console.warn(`[worker] 작업 ${job.id} 실패 (${failedAttempts}/${MAX_ATTEMPTS}회), 자동 재시도: ${message}`);
+          this.scheduleRetry(job.id, failedAttempts, message);
+        } else {
+          store.patch(job.id, (j) => {
+            j.status = "failed";
+            j.error = message;
+            j.finishedAt = Date.now();
+          });
+          console.error(`[worker] 작업 ${job.id} 실패 (${MAX_ATTEMPTS}/${MAX_ATTEMPTS}회, 재시도 소진):`, err);
+        }
+      }
     } finally {
       this.cancelFns.delete(job.id);
       this.timing.delete(job.id);
@@ -63,6 +85,24 @@ class Worker {
       comfy.invalidateStatus();
       void publishEngineStatus();
     }
+  }
+
+  /** 실패한 작업을 대기열로 되돌리고 백오프 뒤에 다시 실행한다. */
+  private scheduleRetry(jobId: string, attempt: number, message: string): void {
+    const delay = retryDelayMs(attempt);
+    store.patch(jobId, (j) => {
+      j.status = "queued";
+      j.error = message;
+      j.retryAt = Date.now() + delay;
+      j.progress = { step: 0, total: j.params.steps, phase: "queued" };
+    });
+    const prev = this.retryTimers.get(jobId);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(jobId);
+      this.kick();
+    }, delay);
+    this.retryTimers.set(jobId, timer);
   }
 
   private applyUpdate(jobId: string, u: ProgressUpdate): void {
@@ -91,9 +131,15 @@ class Worker {
   async cancel(id: string): Promise<Job | undefined> {
     const job = store.get(id);
     if (!job) return undefined;
+    const pending = this.retryTimers.get(id);
+    if (pending) {
+      clearTimeout(pending);
+      this.retryTimers.delete(id);
+    }
     if (job.status === "queued") {
       return store.patch(id, (j) => {
         j.status = "cancelled";
+        j.error = undefined;
         j.finishedAt = Date.now();
       });
     }

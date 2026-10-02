@@ -1,9 +1,10 @@
 "use client";
 
-import { Loader2Icon, PlayIcon, SparklesIcon } from "lucide-react";
+import { ImageIcon, ListTodoIcon, Loader2Icon, PlayIcon, SparklesIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { EngineStatus } from "@/lib/types";
 
@@ -11,9 +12,14 @@ interface Props {
   engine: EngineStatus | null;
   connected: boolean;
   onStartComfy: () => void;
+  /** 상단 탭으로 옮긴 결과 패널 전환. 폼을 스크롤하지 않고도 완료 갤러리로 갈 수 있다. */
+  resultsTab: string;
+  onResultsTabChange: (value: string) => void;
+  activeCount: number;
+  doneCount: number;
 }
 
-export function Header({ engine, connected, onStartComfy }: Props) {
+export function Header({ engine, connected, onStartComfy, resultsTab, onResultsTabChange, activeCount, doneCount }: Props) {
   const comfy = engine?.comfy;
   const comfyState: "on" | "starting" | "off" | "unknown" = !comfy
     ? "unknown"
@@ -35,6 +41,21 @@ export function Header({ engine, connected, onStartComfy }: Props) {
             <p className="hidden text-xs text-muted-foreground sm:block">Apple Silicon 로컬 이미지 생성</p>
           </div>
         </div>
+
+        <Tabs value={resultsTab} onValueChange={(value) => onResultsTabChange(value as string)} className="ml-2 sm:ml-4">
+          <TabsList>
+            <TabsTrigger value="progress" className="gap-2">
+              <ListTodoIcon />
+              <span className="hidden sm:inline">진행 중</span>
+              <span className="tabular-nums">{activeCount}</span>
+            </TabsTrigger>
+            <TabsTrigger value="gallery" className="gap-2">
+              <ImageIcon />
+              <span className="hidden sm:inline">완료 갤러리</span>
+              <span className="tabular-nums">{doneCount}</span>
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
 
         <div className="ml-auto flex items-center gap-2">
           <Tooltip>

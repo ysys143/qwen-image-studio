@@ -122,14 +122,25 @@ export interface ReferenceRequest {
   nonce: number;
 }
 
+export interface PromptMatrixRequest {
+  /** 프롬프트마다 하나씩 적용할 이미지의 업로드 ID 목록 */
+  ids: string[];
+  /** 이미지별로 차례로 적용할 프롬프트 */
+  prompts: string[];
+  nonce: number;
+}
+
 interface Props {
   engine: EngineStatus | null;
   loadRequest: LoadRequest | null;
   referenceRequest: ReferenceRequest | null;
+  promptMatrixRequest: PromptMatrixRequest | null;
   /** 끝난 작업 목록. 배치 편집 중 처리가 끝난 참조 이미지를 폼에서 빼는 데 쓴다 */
   finishedJobs: Job[];
   /** perReference 가 true 면 참조 이미지 한 장마다 같은 프롬프트를 적용한 작업을 따로 만든다 */
   onSubmit: (params: GenerationParams, count: number, perReference?: boolean) => Promise<unknown>;
+  /** 이미지와 프롬프트의 모든 조합을 대기열에 추가한다 */
+  onSubmitPromptMatrix: (params: GenerationParams, prompts: string[]) => Promise<unknown>;
 }
 
 const ENGINE_ITEMS: { value: Engine; label: string }[] = [
@@ -183,7 +194,15 @@ function parseSaved(raw: string | null): Saved | null {
   }
 }
 
-export function GeneratorForm({ engine, loadRequest, referenceRequest, finishedJobs, onSubmit }: Props) {
+export function GeneratorForm({
+  engine,
+  loadRequest,
+  referenceRequest,
+  promptMatrixRequest,
+  finishedJobs,
+  onSubmit,
+  onSubmitPromptMatrix,
+}: Props) {
   // 서버 렌더링에서는 기본값, 브라우저에서는 마지막에 저장한 설정으로 시작한다.
   const savedRaw = useSyncExternalStore(noopSubscribe, readSavedRaw, () => null);
   const saved = useMemo(() => parseSaved(savedRaw), [savedRaw]);
@@ -207,6 +226,8 @@ export function GeneratorForm({ engine, loadRequest, referenceRequest, finishedJ
   const [libraryOpen, setLibraryOpen] = useState(false);
   const promptPresets = useSyncExternalStore(subscribePromptPresets, readPromptPresets, () => EMPTY_PROMPT_PRESETS);
   const [selectedPromptPresetId, setSelectedPromptPresetId] = useState("");
+  const handledPromptMatrixNonce = useRef<number | null>(null);
+  const promptMatrixInFlight = useRef(false);
   /** 배치 편집을 시작한 시각. 이 뒤에 끝난 작업의 참조는 폼에서 뺀다 */
   const [batchStartedAt, setBatchStartedAt] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -456,10 +477,47 @@ export function GeneratorForm({ engine, loadRequest, referenceRequest, finishedJ
     return style?.suffix && base ? `${base}, ${style.suffix}` : base;
   }, [form.prompt, form.styleId]);
 
+  useEffect(() => {
+    if (
+      !promptMatrixRequest ||
+      handledPromptMatrixNonce.current === promptMatrixRequest.nonce ||
+      submitting ||
+      promptMatrixInFlight.current
+    ) return;
+    handledPromptMatrixNonce.current = promptMatrixRequest.nonce;
+
+    const style = STYLE_PRESETS.find((item) => item.id === form.styleId);
+    const prompts = promptMatrixRequest.prompts
+      .map((prompt) => prompt.trim())
+      .filter(Boolean)
+      .map((prompt) => (style?.suffix ? `${prompt}, ${style.suffix}` : prompt));
+    if (promptMatrixRequest.ids.length === 0 || prompts.length === 0) {
+      toast.error("이미지와 프롬프트를 확인한 뒤 다시 시도하세요.");
+      return;
+    }
+
+    promptMatrixInFlight.current = true;
+    void onSubmitPromptMatrix(
+      {
+        ...form,
+        prompt: prompts[0],
+        references: promptMatrixRequest.ids,
+        referenceMode: "each",
+        gguf: form.gguf || pickGguf(ggufFiles),
+        textEncoder: form.textEncoder || pickTextEncoder(textEncoders),
+      },
+      prompts,
+    )
+      .catch((error) => toast.error(error instanceof Error ? error.message : "프롬프트 조합을 대기열에 추가하지 못했습니다"))
+      .finally(() => {
+        promptMatrixInFlight.current = false;
+      });
+  }, [form, ggufFiles, onSubmitPromptMatrix, promptMatrixRequest, submitting, textEncoders]);
+
   const canSubmit = form.prompt.trim().length > 0 && !submitting;
 
   const handleSubmit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || promptMatrixInFlight.current) return;
     setSubmitting(true);
     try {
       await onSubmit(

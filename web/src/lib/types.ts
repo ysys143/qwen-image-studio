@@ -70,6 +70,10 @@ export interface Job {
   image?: JobImage;
   error?: string;
   promptId?: string;
+  /** 지금까지 실행을 시도한 횟수 (최초 시도 포함). 자동 재시도 판단에 쓴다. */
+  attempts?: number;
+  /** 이 시각(ms) 이전에는 자동 재시도로 실행하지 않는다. 실행을 시작하면 지운다. */
+  retryAt?: number;
 }
 
 export interface ComfyStatus {
@@ -111,6 +115,8 @@ export interface CreateJobsRequest {
   count?: number;
   /** true 면 params.references 의 각 이미지마다 별도 작업을 만든다 (배치 편집) */
   perReference?: boolean;
+  /** 지정하면 각 참조 이미지와 프롬프트를 조합해 이미지 우선 순서로 작업을 만든다 */
+  prompts?: string[];
 }
 
 export interface UploadEntry extends UploadInfo {

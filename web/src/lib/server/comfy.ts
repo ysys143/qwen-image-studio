@@ -251,6 +251,7 @@ class ComfyClient {
       await new Promise((r) => setTimeout(r, 2000));
       if (await this.isReachable()) {
         console.log("[comfy] 서버가 준비되었습니다.");
+        await this.clearQueue();
         return;
       }
       if (child.exitCode !== null) {
@@ -258,6 +259,30 @@ class ComfyClient {
       }
     }
     throw new Error("ComfyUI 서버가 4분 안에 준비되지 않았습니다.");
+  }
+
+  /**
+   * 서버가 새로 뜨면 이전 서버가 남긴 잔여 큐를 비운다.
+   * 이 앱은 한 번에 한 작업만 제출하므로, 남아 있는 항목은 고아 작업이다.
+   */
+  private async clearQueue(): Promise<void> {
+    try {
+      const queue = await this.fetchJson<{ queue_running: unknown[]; queue_pending: unknown[] }>("/queue");
+      const stale = queue.queue_running.length + queue.queue_pending.length;
+      if (stale === 0) return;
+      await this.fetchJson(
+        "/queue",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clear: true }),
+        },
+        8_000,
+      );
+      console.warn(`[comfy] 새 서버에서 잔여 큐 ${stale}개를 비웠습니다.`);
+    } catch (err) {
+      console.error("[comfy] 잔여 큐를 비우지 못했습니다:", err);
+    }
   }
 
   async publishEngineStatus(): Promise<void> {

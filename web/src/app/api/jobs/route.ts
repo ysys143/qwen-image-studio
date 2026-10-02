@@ -87,7 +87,21 @@ export async function POST(req: Request) {
   // 작업별 파라미터 목록. 배치 편집이면 참조 한 장마다 하나, 아니면 하나.
   let variants: GenerationParams[];
   try {
-    if (body.perReference) {
+    if (body.prompts !== undefined) {
+      if (!Array.isArray(body.prompts)) throw new Error("프롬프트 목록 형식이 올바르지 않습니다.");
+      const prompts = body.prompts
+        .map((prompt) => {
+          if (typeof prompt !== "string") throw new Error("프롬프트 목록 형식이 올바르지 않습니다.");
+          return prompt.trim();
+        })
+        .filter(Boolean);
+      if (prompts.length === 0) throw new Error("프롬프트를 하나 이상 입력하세요.");
+      const batch = normalize({ ...(body.params ?? {}), prompt: prompts[0] }, Number.POSITIVE_INFINITY);
+      if (batch.references.length === 0) throw new Error("프롬프트 조합 생성에는 참조 이미지가 필요합니다.");
+      variants = batch.references.flatMap((reference) =>
+        prompts.map((prompt) => ({ ...batch, prompt, references: [reference] })),
+      );
+    } else if (body.perReference) {
       const batch = normalize(body.params ?? {}, Number.POSITIVE_INFINITY);
       if (batch.references.length === 0) throw new Error("배치 편집에는 참조 이미지가 필요합니다.");
       variants = batch.references.map((id) => ({ ...batch, references: [id] }));

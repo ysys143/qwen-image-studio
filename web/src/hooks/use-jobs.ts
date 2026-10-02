@@ -120,10 +120,15 @@ export function useJobs() {
   }, []);
 
   const jobs = useMemo(() => Object.values(state.jobs).sort((a, b) => b.createdAt - a.createdAt), [state.jobs]);
+  // 서버가 자동 재시도로 다시 돌린 작업(실패 이력이 있는 대기·실행 작업). 갤러리에서 "재시도 중"으로 보여준다.
+  const retrying = useMemo(
+    () => jobs.filter((j) => (j.attempts ?? 0) >= 1 && (j.status === "queued" || j.status === "running")),
+    [jobs],
+  );
   const active = useMemo(
     () =>
       jobs
-        .filter((j) => j.status === "running" || j.status === "queued")
+        .filter((j) => j.status === "running" || (j.status === "queued" && (j.attempts ?? 0) === 0))
         .sort((a, b) => {
           if (a.status !== b.status) return a.status === "running" ? -1 : 1;
           return a.createdAt - b.createdAt;
@@ -142,6 +147,12 @@ export function useJobs() {
           ? `${n}개 작업을 대기열에 추가했습니다`
           : "작업을 대기열에 추가했습니다",
     );
+    return res.jobs;
+  }, []);
+
+  const createPromptMatrix = useCallback(async (params: GenerationParams, prompts: string[]) => {
+    const res = await api.createJobs({ params, prompts });
+    toast.info(`${params.references.length}장 × ${prompts.length}개 프롬프트 = ${res.jobs.length}개 작업을 대기열에 추가했습니다`);
     return res.jobs;
   }, []);
 
@@ -184,18 +195,38 @@ export function useJobs() {
     }
   }, []);
 
+  /** 작업 목록과 엔진 상태를 서버에서 다시 불러온다. 갤러리 새로고침 버튼에서 쓴다. */
+  const refresh = useCallback(async () => {
+    const [jobsResult, statusResult] = await Promise.allSettled([api.listJobs(), api.status()]);
+    if (jobsResult.status === "rejected") {
+      toast.error(jobsResult.reason instanceof Error ? jobsResult.reason.message : "작업 목록을 불러오지 못했습니다");
+      return;
+    }
+    const jobs = jobsResult.value.jobs;
+    for (const job of jobs) prevStatus.current[job.id] = job.status;
+    setState((s) => ({
+      ...s,
+      jobs: Object.fromEntries(jobs.map((job) => [job.id, job])),
+      loaded: true,
+      engine: statusResult.status === "fulfilled" ? statusResult.value : s.engine,
+    }));
+  }, []);
+
   return {
     jobs,
     active,
+    retrying,
     finished,
     previews: state.previews,
     engine: state.engine,
     connected: state.connected,
     loaded: state.loaded,
     createJobs,
+    createPromptMatrix,
     cancelJob,
     deleteJobs,
     startComfy,
     refreshStatus,
+    refresh,
   };
 }

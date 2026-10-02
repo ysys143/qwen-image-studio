@@ -5,6 +5,8 @@ Apple Silicon Mac 에서 [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image
 
 ![Qwen Image Studio 화면](docs/screenshot.png)
 
+Mac mini 운영·수동 재기동·Cloudflare DNS·모델 설치 현황은 [운영 기록](docs/operations.md)에 정리했습니다.
+
 - **웹 앱** (`web/`): Next.js 16 + shadcn/ui. 비동기 대기열, SSE 실시간 진행률·미리보기, 참조 이미지 편집, 갤러리 검색·삭제·재생성
 - **ComfyUI + GGUF** 백엔드: 양자화 모델로 36GB 메모리에서 동작. 웹 앱이 ComfyUI 를 자동으로 켭니다
 - **mflux(MLX)** 백엔드: bf16 원본 가중치를 Apple MLX 로 실행하는 대안 경로
@@ -190,9 +192,19 @@ Next.js 16 + shadcn/ui(Base UI) 로 만들었고 `web/` 폴더에 있습니다.
 ./run-web-background.sh --stop --delete  # 데이터를 모두 지운 뒤 정지
 ```
 
-ComfyUI 서버가 꺼져 있으면 첫 생성 요청 때 `run-comfyui.sh` 를 자동으로 실행합니다(준비까지 1분 안팎).
+Mac mini에서는 ComfyUI·앱·암호 보호 프록시·Cloudflare Named Tunnel을 수동 스크립트로 시작합니다. 프로세스는 Codex 세션과 독립적으로 실행되지만 로그인 시 자동 시작하거나 중단 후 자동 복구하지는 않습니다.
+
+```bash
+./run-studio-services.sh start    # 중지된 서비스 시작
+./run-studio-services.sh status   # ComfyUI·앱·프록시·터널 상태
+./run-studio-services.sh logs     # 로그 실시간 보기
+./run-studio-services.sh stop     # 대기·생성 작업이 없을 때 전체 중지
+```
+
+터널 암호는 저장소 밖의 `~/Library/Application Support/Qwen Image Studio/tunnel-password`에 권한을 제한해 보관합니다. 고정 접속 주소는 `https://studio.jaesolshin.com`입니다. 자세한 운영·복구 절차는 [운영 기록](docs/operations.md)을 참고하세요.
+
+`run-studio-services.sh`는 ComfyUI를 함께 시작합니다. `run-web.sh`를 단독 실행한 경우에는 첫 생성 요청 때 ComfyUI를 자동으로 실행합니다(준비까지 1분 안팎).
 헤더의 배지에서 ComfyUI·mflux 상태와 실시간 연결 상태를 확인할 수 있습니다.
-웹 앱이 자동으로 켠 ComfyUI 는 웹 앱을 종료해도 백그라운드에 남습니다. 끄려면 `pkill -f "ComfyUI/main.py"` 를 실행하세요.
 
 ### 기능
 
@@ -202,8 +214,9 @@ ComfyUI 서버가 꺼져 있으면 첫 생성 요청 때 `run-comfyui.sh` 를 �
 | 고급 설정 | 엔진(ComfyUI GGUF / mflux MLX), GGUF 모델·텍스트 인코더 또는 mflux 양자화 비트, 스텝, CFG 와 부정 프롬프트, 시드 고정·무작위, 임의 크기, 샘플러·스케줄러, 연속 생성 수(최대 8장) |
 | 비동기 처리 | 요청은 대기열에 쌓이고 서버의 워커가 한 번에 하나씩 실행합니다. 브라우저를 닫아도 생성은 계속되고 기록은 `web/data/jobs.json` 에 남습니다 |
 | 실시간 진행률 | 단계(모델 로딩 → 프롬프트 처리 → 생성 → 디코딩 → 저장), 스텝 수, 경과·남은 시간, 생성 중 미리보기 이미지를 SSE 로 전달합니다 |
-| 갤러리 | 완료 이미지 격자, 프롬프트·시드 검색, 완료/실패 필터, 상세 보기(← → 로 이동), 설정 불러오기, 같은 시드·새 시드로 재생성, 참조 이미지로 추가(선택한 수만큼 배치 처리), 이 이미지 편집하기, 다운로드, 개별·선택 삭제 |
+| 갤러리 | 완료 이미지 격자, 프롬프트·시드 검색, 완료/실패 필터, 상세 보기(← → 로 이동), 설정 불러오기, 같은 시드·새 시드로 재생성, 참조 이미지로 추가(선택한 수만큼 배치 처리), 선택 이미지마다 여러 프롬프트를 적용하는 조합 생성, 이 이미지 편집하기, 다운로드, 개별·선택 삭제 |
 | 취소 | 대기 중 작업은 대기열에서 제거하고, 실행 중 작업은 ComfyUI 인터럽트 또는 mflux 프로세스 종료로 중단합니다 |
+| 자동 재시도 | 엔진 오류나 일시적 연결 문제로 작업이 실패하면 같은 작업을 대기열로 되돌려 자동으로 다시 실행합니다. 최초 실행을 포함해 최대 `QWEN_MAX_ATTEMPTS`(기본 3)회, 재시도 사이에는 지수 백오프를 둡니다. 사용자가 취소한 작업은 재시도하지 않습니다 |
 | 이미지 편집 | 참조 이미지를 최대 3장 올리거나(끌어다 놓기 지원) 갤러리 메뉴의 "참조 이미지로 추가"·"이 이미지 편집하기"로 불러온 뒤, 프롬프트에 편집 지시를 쓰면 Qwen-Image-2.1 의 편집 기능으로 생성합니다. 출력 크기는 첫 참조 이미지에 맞추거나 직접 지정할 수 있습니다. mflux 엔진에서는 첫 이미지만 img2img(변경 강도 조절)로 씁니다 |
 | 배치 편집 | 참조 이미지를 원하는 수만큼 올리거나 보관함·갤러리에서 고른 뒤 "각 이미지에 따로 적용"을 선택하면, 같은 프롬프트를 각 이미지에 적용한 작업이 한 장마다 하나씩 만들어집니다. 4장 이상 넣으면 자동으로 이 모드가 됩니다 |
 | 참조 이미지 보관함 | 지금까지 올린 참조 이미지를 모아 보고 여러 장을 골라 폼에 넣거나 서버에서 지웁니다 |
