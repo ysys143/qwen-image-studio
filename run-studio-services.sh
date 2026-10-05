@@ -22,6 +22,10 @@ COMFY_BASE_URL="${COMFY_URL:-http://127.0.0.1:8188}"
 # --force 는 대기·생성 중 작업이 있어도 중지/재시작한다. 멈춘 서비스를 복구할 때만 쓴다.
 FORCE=0
 
+# next-server 는 시작 직후 프로세스 제목을 `next-server (vX.Y.Z)` 로 바꾼다.
+# 따라서 `next/dist/bin/next` 경로로는 정지·상태 판별이 실패해 프로세스가 남는다.
+WEB_MARKER='next-server'
+
 WEB_LABEL="com.qwen-image-studio.web"
 AUTH_LABEL="com.qwen-image-studio.auth"
 TUNNEL_LABEL="com.qwen-image-studio.tunnel"
@@ -249,7 +253,7 @@ start_services() {
   prepare_password
   if [[ "$(http_code "$BASE_URL/api/status")" == "200" ]] &&
     [[ "$(http_code "$PROXY_URL/")" == "401" ]] &&
-    pid_matches "$WEB_PID_FILE" 'next/dist/bin/next' &&
+    pid_matches "$WEB_PID_FILE" "$WEB_MARKER" &&
     pid_matches "$AUTH_PID_FILE" 'tunnel-auth-proxy.js'; then
     start_comfy
     start_tunnel
@@ -293,13 +297,30 @@ stop_pid() {
   rm -f "$pid_file"
 }
 
+# PID 파일이 없거나 낡아 stop_pid 가 놓친 리스너를 정리한다.
+# 마커가 맞을 때만 끝내 다른 프로세스를 건드리지 않는다.
+stop_stale_listener() {
+  local port="$1" marker="$2" pid command_line
+  for pid in $(listener_pids "$port"); do
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [[ "$command_line" == *"$marker"* ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  done
+}
+
 stop_services() {
   NODE_BIN="$(command -v node >/dev/null 2>&1 && node -p 'process.execPath' || echo node)"
   ensure_idle
   remove_legacy_agents
   stop_pid "$TUNNEL_PID_FILE" 'cloudflared tunnel'
   stop_pid "$AUTH_PID_FILE" 'tunnel-auth-proxy.js'
-  stop_pid "$WEB_PID_FILE" 'next/dist/bin/next'
+  stop_pid "$WEB_PID_FILE" "$WEB_MARKER"
+  stop_stale_listener 3210 "$WEB_MARKER"
   stop_pid "$COMFY_PID_FILE" 'main.py'
   printf 'ComfyUI, 웹 앱, 인증 프록시, Named Tunnel을 중지했습니다. 저장된 이미지와 암호는 유지했습니다.\n'
 }
