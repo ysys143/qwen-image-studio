@@ -13,7 +13,7 @@ import {
   WEB_IMAGES_DIR,
   envWithPath,
 } from "./paths";
-import { readPngSize } from "./png";
+import { readPngSize, stripPngTextChunks } from "./png";
 import { uploadPath } from "./uploads";
 
 export class CancelledError extends Error {
@@ -511,6 +511,8 @@ class ComfyClient {
       if (!fs.existsSync(/*turbopackIgnore: true*/ src)) throw new Error(`출력 파일을 찾을 수 없습니다: ${src}`);
       fs.renameSync(src, dest);
     }
+    // ComfyUI 가 넣은 워크플로 텍스트 청크에는 프롬프트 원문이 들어 있다. 저장 전에 걷어낸다.
+    stripPngTextChunks(dest);
     const { width, height } = readPngSize(dest);
     return { file: dest, width, height, bytes: fs.statSync(dest).size };
   }

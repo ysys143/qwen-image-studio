@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Job } from "@/lib/types";
 import { publish } from "./events";
 import { ensureDirs, JOBS_FILE } from "./paths";
+import { decryptText, encryptText } from "./prompt-crypto";
 import { MAX_ATTEMPTS } from "./retry";
 
 export class JobStore {
@@ -50,6 +51,9 @@ export class JobStore {
     try {
       const raw = JSON.parse(fs.readFileSync(JOBS_FILE, "utf8")) as { jobs?: Job[] };
       for (const job of raw.jobs ?? []) {
+        // 프롬프트는 파일에 암호화해 둔다. 메모리로 올릴 때만 평문으로 되돌린다.
+        job.params.prompt = decryptText(job.params.prompt);
+        job.params.negativePrompt = decryptText(job.params.negativePrompt);
         // 재시도 예약 시각은 메모리에만 있던 값이다. 다시 뜬 서버에서는 곧바로 실행한다.
         job.retryAt = undefined;
         // 서버가 재시작되면 실행 중이던 작업은 이어갈 수 없다.
@@ -97,7 +101,16 @@ export class JobStore {
     try {
       ensureDirs();
       const tmp = path.join(path.dirname(JOBS_FILE), `.jobs.${process.pid}.tmp`);
-      fs.writeFileSync(tmp, JSON.stringify({ jobs: this.list() }, null, 2));
+      // 저장할 때만 프롬프트를 암호화한다. jobs.json 을 열어도 평문이 남지 않는다.
+      const persisted = this.list().map((job) => ({
+        ...job,
+        params: {
+          ...job.params,
+          prompt: encryptText(job.params.prompt),
+          negativePrompt: encryptText(job.params.negativePrompt),
+        },
+      }));
+      fs.writeFileSync(tmp, JSON.stringify({ jobs: persisted }, null, 2));
       fs.renameSync(tmp, JOBS_FILE);
     } catch (err) {
       console.error("[store] jobs.json 저장 실패:", err);

@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Job, JobImage, JobProgress } from "@/lib/types";
 import { CancelledError } from "./comfy";
 import { envWithPath, MFLUX_BIN, ROOT, WEB_IMAGES_DIR } from "./paths";
-import { readPngSize } from "./png";
+import { readPngSize, stripPngTextChunks } from "./png";
 import { uploadPath } from "./uploads";
 
 type Updater = (update: Partial<JobProgress>) => void;
@@ -102,6 +102,8 @@ export async function runMflux(
       }
       if (!fs.existsSync(dest)) return reject(new Error("mflux 가 출력 파일을 만들지 않았습니다."));
       update({ phase: "saving" });
+      // 프롬프트가 메타데이터로 남지 않도록 텍스트 청크를 걷어낸다.
+      stripPngTextChunks(dest);
       const { width, height } = readPngSize(dest);
       resolve({ file: dest, width, height, bytes: fs.statSync(dest).size });
     });
