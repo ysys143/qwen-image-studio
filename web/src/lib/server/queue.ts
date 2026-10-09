@@ -7,12 +7,18 @@ import { store } from "./store";
 
 type ProgressUpdate = Partial<JobProgress> & { promptId?: string };
 
+/** 대기열이 빈 뒤 모델 메모리를 내리기까지 기다리는 시간 (ms). 0 이면 끔. */
+const IDLE_RECLAIM_MS = Math.max(0, Number(process.env.QWEN_IDLE_RECLAIM_MS ?? 60_000) || 0);
+
 class Worker {
   runningId: string | undefined;
   private cancelFns = new Map<string, () => Promise<void>>();
   private timing = new Map<string, { samplingStartedAt: number; firstStep: number }>();
   private kicking = false;
   private retryTimers = new Map<string, NodeJS.Timeout>();
+  /** 마지막으로 모델 메모리를 내린 시각. 대기열이 빈 상태가 이어질 때 한 번만 내린다. */
+  private lastReclaimAt = 0;
+  private reclaimTimer: NodeJS.Timeout | undefined;
 
   kick(): void {
     if (this.runningId || this.kicking) return;
@@ -20,7 +26,10 @@ class Worker {
       .list()
       .filter((j) => j.status === "queued" && !(j.retryAt && j.retryAt > Date.now()))
       .sort((a, b) => a.createdAt - b.createdAt)[0];
-    if (!next) return;
+    if (!next) {
+      this.scheduleReclaim();
+      return;
+    }
     this.kicking = true;
     void this.run(next).finally(() => {
       this.kicking = false;
@@ -28,7 +37,33 @@ class Worker {
     });
   }
 
+  /**
+   * 대기열이 빈 상태가 잠깐 이어지면 ComfyUI 가 붙들고 있는 모델을 내린다.
+   * 곧 다음 작업이 들어올 수도 있으므로 유예 시간을 두고, 이미 내렸으면 다시 하지 않는다.
+   */
+  private scheduleReclaim(): void {
+    if (this.reclaimTimer || !IDLE_RECLAIM_MS) return;
+    if (Date.now() - this.lastReclaimAt < IDLE_RECLAIM_MS) return;
+    this.reclaimTimer = setTimeout(() => {
+      this.reclaimTimer = undefined;
+      // 기다리는 동안 새 작업이 들어왔으면 내리지 않는다.
+      if (this.runningId || this.kicking) return;
+      const queued = this.queuedCount();
+      if (queued > 0) return;
+      this.lastReclaimAt = Date.now();
+      void comfy.freeMemory(true).then((ok) => {
+        if (ok) console.log("[worker] 대기열이 비어 모델 메모리를 반환했습니다.");
+      });
+    }, IDLE_RECLAIM_MS);
+    this.reclaimTimer.unref();
+  }
+
   private async run(job: Job): Promise<void> {
+    // 작업이 들어오면 예약된 수거를 취소한다.
+    if (this.reclaimTimer) {
+      clearTimeout(this.reclaimTimer);
+      this.reclaimTimer = undefined;
+    }
     this.runningId = job.id;
     job.status = "running";
     job.startedAt = Date.now();

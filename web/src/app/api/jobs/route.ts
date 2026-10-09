@@ -16,6 +16,7 @@ import {
 import type { CreateJobsRequest, GenerationParams, Job } from "@/lib/types";
 import { removeJobFiles } from "@/lib/server/files";
 import { publishEngineStatus, worker } from "@/lib/server/queue";
+import { checkCapacity } from "@/lib/server/retention";
 import { store } from "@/lib/server/store";
 import { uploadExists } from "@/lib/server/uploads";
 
@@ -110,6 +111,12 @@ export async function POST(req: Request) {
     }
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+  }
+
+  // 처리 속도보다 빨리 쌓이거나 디스크가 바닥나면 받지 않는다. 시스템이 멈추는 것을 막는 상한이다.
+  const capacity = checkCapacity(variants.length * count);
+  if (!capacity.ok) {
+    return NextResponse.json({ error: capacity.reason }, { status: 429 });
   }
 
   const jobs: Job[] = [];

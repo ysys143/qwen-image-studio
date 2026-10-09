@@ -27,7 +27,8 @@ function loadKey(): Buffer {
     return buf;
   }
   try {
-    const buf = Buffer.from(fs.readFileSync(KEY_FILE, "utf8").trim(), "base64");
+    // 키 파일 경로는 환경변수로 바뀔 수 있다. 빌드 시 프로젝트 전체를 추적하지 않게 표시한다.
+    const buf = Buffer.from(fs.readFileSync(/*turbopackIgnore: true*/ KEY_FILE, "utf8").trim(), "base64");
     if (buf.length === 32) return buf;
   } catch {
     /* 아직 없으면 아래에서 새로 만든다 */

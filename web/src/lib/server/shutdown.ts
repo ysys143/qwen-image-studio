@@ -22,6 +22,7 @@ export function installShutdownHandlers(): void {
     try {
       triggerShutdown();
       store.flush();
+      void import("./retention").then((m) => m.stopRetentionScheduler()).catch(() => undefined);
     } catch (err) {
       console.error("[server] 종료 정리 중 오류:", err);
     }
