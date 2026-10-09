@@ -88,10 +88,23 @@ export interface ComfyStatus {
   error?: string;
 }
 
+/** 자동 정리 정책이 판단한 지금의 수용 여력. 화면에서 미리 경고하는 데 쓴다. */
+export interface CapacityStatus {
+  ok: boolean;
+  /** 거절 사유 (ok 이면 없음) */
+  reason?: string;
+  queueFull: boolean;
+  diskLow: boolean;
+  queued: number;
+  freeBytes?: number;
+}
+
 export interface EngineStatus {
   comfy: ComfyStatus;
   mflux: { available: boolean; path?: string };
   worker: { runningJobId?: string; queued: number };
+  /** 정리 정책 계산값. 옛 서버 응답에는 없을 수 있다. */
+  capacity?: CapacityStatus;
 }
 
 export type ServerEvent =

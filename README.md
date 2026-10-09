@@ -240,6 +240,19 @@ Mac mini에서는 ComfyUI·앱·암호 보호 프록시·Cloudflare Named Tunnel
 
 환경변수 `PORT`, `COMFY_URL`, `COMFY_AUTOSTART`, `QWEN_ROOT` 로 포트·ComfyUI 주소·자동 시작·루트 폴더를 바꿀 수 있습니다.
 
+### 자동 정리 정책
+
+참조 이미지와 작업이 끝없이 쌓여 디스크가 차고 스왑이 자라 시스템이 멈추는 문제를 막기 위해, 서버가 세 가지를 상시 강제합니다.
+
+| 정책 | 기본값 | 동작 |
+| --- | --- | --- |
+| 대기열 상한 | 300 (`QWEN_MAX_QUEUE`) | 대기열이 상한을 넘으면 새 작업을 429 로 거절합니다 |
+| 디스크 하한 | 8GB (`QWEN_MIN_FREE_GB`) | 남은 공간이 이보다 적으면 새 작업을 거절합니다 |
+| 참조 이미지 정리 | 30분 (`QWEN_CLEANUP_INTERVAL_MIN`) | 어느 작업도 참조하지 않는 업로드 이미지를 지웁니다. 올린 지 30분(`QWEN_UPLOAD_GRACE_MIN`) 안 된 것은 남깁니다 |
+| 유휴 메모리 반환 | 60초 (`QWEN_IDLE_RECLAIM_MS`) | 대기열이 빈 뒤 이만큼 지나면 ComfyUI 에 모델을 내리게 해 메모리를 돌려받습니다 |
+
+`/api/status` 응답의 `capacity` 필드에 여유 공간과 거절 여부가 함께 실립니다. 정책 값은 위 환경변수로 조정하고, 0 으로 두면 해당 정책을 끕니다.
+
 ## 텍스트 인코더 교체: Heretic GGUF (거부 완화)
 
 [pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF](https://huggingface.co/pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF) 는
