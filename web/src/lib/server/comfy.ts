@@ -134,7 +134,7 @@ class ComfyClient {
 
   // ---------- HTTP ----------
 
-  private async fetchJson<T>(route: string, init?: RequestInit, timeoutMs = 4000): Promise<T> {
+  private async fetchJson<T>(route: string, init?: RequestInit, timeoutMs = 15000): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -149,9 +149,9 @@ class ComfyClient {
     }
   }
 
-  async isReachable(): Promise<boolean> {
+  async isReachable(timeoutMs = 8000): Promise<boolean> {
     try {
-      await this.fetchJson("/system_stats", undefined, 2500);
+      await this.fetchJson("/system_stats", undefined, timeoutMs);
       return true;
     } catch {
       return false;
@@ -211,10 +211,38 @@ class ComfyClient {
     this.statusCache = null;
   }
 
+  // ---------- 메모리 수거 ----------
+
+  /**
+   * ComfyUI 가 붙들고 있는 모델을 메모리에서 내린다.
+   *
+   * 이 앱은 Q8 모델(약 21GB)과 텍스트 인코더를 24GB 기계에서 번갈아 쓴다.
+   * 대기열이 빌 때 모델을 내려 주지 않으면 스왑이 계속 자라 시스템 전체가 느려진다.
+   * /free 는 ComfyUI 0.37 이 지원하는 표준 엔드포인트이며, 실패해도 생성에는 지장이 없다.
+   */
+  async freeMemory(unloadModels = true): Promise<boolean> {
+    try {
+      await this.fetchJson<Record<string, unknown>>("/free", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unload_models: unloadModels, free_memory: true }),
+      }, 5000);
+      this.invalidateStatus();
+      return true;
+    } catch (err) {
+      console.warn("[comfy] 메모리 해제 요청 실패:", err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
   // ---------- 서버 자동 시작 ----------
 
   async ensureRunning(): Promise<void> {
-    if (await this.isReachable()) return;
+    // 서버가 샘플링으로 바쁘면 짧은 순간 응답이 늦어질 수 있다. 단발 타임아웃으로 "연결 불가"로 단정하지 않는다.
+    for (let i = 0; i < 3; i++) {
+      if (await this.isReachable()) return;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
     if (!COMFY_AUTOSTART) {
       throw new Error(`ComfyUI 서버(${COMFY_URL})에 연결할 수 없습니다. 먼저 ./run-comfyui.sh 로 서버를 실행하세요.`);
     }
@@ -473,7 +501,7 @@ class ComfyClient {
       // 웹소켓이 끊겨 이벤트를 놓쳤을 때를 대비해 주기적으로 이력을 확인한다.
       const poll = setInterval(async () => {
         try {
-          const hist = await this.fetchJson<Record<string, ComfyHistoryEntry>>(`/history/${promptId}`);
+          const hist = await this.fetchJson<Record<string, ComfyHistoryEntry>>(`/history/${promptId}`, undefined, 20_000);
           const entry = hist[promptId];
           if (!entry?.status) return;
           if (entry.status.status_str === "success") waiter.resolve();
@@ -496,25 +524,54 @@ class ComfyClient {
     });
 
     update({ phase: "saving" });
-    const hist = await this.fetchJson<Record<string, ComfyHistoryEntry>>(`/history/${promptId}`);
-    const outputs = hist[promptId]?.outputs ?? {};
-    const image = Object.values(outputs)
-      .flatMap((o) => o.images ?? [])
-      .find((img) => img.type === "output");
-    if (!image) throw new Error("ComfyUI 가 출력 이미지를 남기지 않았습니다.");
+    // 이력 조회가 타임아웃 나도 생성 자체는 끝난 경우가 많다. 실패로 단정하지 않고 저장된 파일 존재로 확인한다.
+    let image: { filename: string; subfolder: string; type: string } | undefined;
+    try {
+      const hist = await this.fetchJson<Record<string, ComfyHistoryEntry>>(`/history/${promptId}`, undefined, 30_000);
+      image = Object.values(hist[promptId]?.outputs ?? {})
+        .flatMap((o) => o.images ?? [])
+        .find((img) => img.type === "output");
+    } catch (err) {
+      console.warn(
+        `[comfy] 이력 조회 실패, 저장된 파일로 확인합니다: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // ComfyUI 가 알려준 파일명으로 만든 경로라 빌드 시 추적 대상이 아니다
-    const src = path.join(/*turbopackIgnore: true*/ OUTPUTS_DIR, image.subfolder ?? "", image.filename);
+    let src = image
+      ? path.join(/*turbopackIgnore: true*/ OUTPUTS_DIR, image.subfolder ?? "", image.filename)
+      : this.findSavedOutput(job.id);
+    if (src && !fs.existsSync(/*turbopackIgnore: true*/ src)) src = this.findSavedOutput(job.id);
+    if (!src) throw new Error("ComfyUI 가 출력 이미지를 남기지 않았습니다.");
+
     const dest = path.join(WEB_IMAGES_DIR, `${job.id}.png`);
     fs.mkdirSync(WEB_IMAGES_DIR, { recursive: true });
     if (path.resolve(/*turbopackIgnore: true*/ src) !== path.resolve(dest)) {
-      if (!fs.existsSync(/*turbopackIgnore: true*/ src)) throw new Error(`출력 파일을 찾을 수 없습니다: ${src}`);
       fs.renameSync(src, dest);
     }
     // ComfyUI 가 넣은 워크플로 텍스트 청크에는 프롬프트 원문이 들어 있다. 저장 전에 걷어낸다.
     stripPngTextChunks(dest);
     const { width, height } = readPngSize(dest);
     return { file: dest, width, height, bytes: fs.statSync(dest).size };
+  }
+
+  /**
+   * SaveImage 는 파일명 앞에 `web/${job.id}` 를 붙여 저장한다. 이력 조회가 실패해도
+   * 이미 저장된 파일을 찾아 결과로 인정하기 위한 조회. (예: `web/<id>_00001_.png`)
+   */
+  private findSavedOutput(jobId: string): string | undefined {
+    const dir = path.join(/*turbopackIgnore: true*/ OUTPUTS_DIR, "web");
+    let names: string[];
+    try {
+      names = fs.readdirSync(/*turbopackIgnore: true*/ dir);
+    } catch {
+      return undefined;
+    }
+    const match = names
+      .filter((n) => n.startsWith(`${jobId}_`) && n.toLowerCase().endsWith(".png"))
+      .sort()
+      .pop();
+    return match ? path.join(/*turbopackIgnore: true*/ dir, match) : undefined;
   }
 
   private async cancelPrompt(promptId: string): Promise<void> {
