@@ -17,6 +17,39 @@ cd "$(dirname "$0")"
 export PORT="${PORT:-3210}"
 PID_FILE="web/.web.pid"
 LOG_FILE="web.log"
+# node 탐색. 비대화형 셸(SSH 원격 실행, cron, launchd)에는 nvm·homebrew 경로가 PATH 에 없다.
+# next 실행 파일은 `#!/usr/bin/env node` 셔뱅이라 PATH 에 node 가 없으면 그대로 실패한다.
+# 그래서 PATH 를 먼저 보정하고, 그래도 없으면 흔한 설치 위치를 직접 찾는다.
+ensure_node_on_path() {
+  if command -v node >/dev/null 2>&1; then return 0; fi
+  # nvm 을 쓴다면 사용자가 고른 기본 버전을 먼저 존중한다. 여러 개면 가장 높은 버전을 쓴다.
+  local nvm_root="$HOME/.nvm/versions/node"
+  local preferred="" picked="" candidate
+  if [[ -r "$HOME/.nvm/alias/default" ]]; then
+    preferred="$(<"$HOME/.nvm/alias/default")"
+    preferred="${preferred#v}"
+  fi
+  if [[ -n "$preferred" && -x "$nvm_root/v$preferred/bin/node" ]]; then
+    picked="$nvm_root/v$preferred/bin"
+  elif [[ -d "$nvm_root" ]]; then
+    picked="$(ls -d "$nvm_root"/*/bin 2>/dev/null | sort -V | tail -1)"
+  fi
+  for candidate in "$picked" /opt/homebrew/bin /usr/local/bin /usr/bin; do
+    if [[ -n "$candidate" && -x "$candidate/node" ]]; then
+      PATH="$candidate:$PATH"
+      export PATH
+      return 0
+    fi
+  done
+  return 1
+}
+
+# node 실행 파일의 절대 경로. PATH 에 없으면 설치 위치를 찾아 돌려준다.
+node_bin() {
+  ensure_node_on_path || return 1
+  node -p 'process.execPath'
+}
+
 BASE="http://127.0.0.1:${PORT}"
 
 STOP=0; DELETE=0; STATUS=0
@@ -89,6 +122,7 @@ if show_status >/dev/null; then
   exit 0
 fi
 [[ -x web/node_modules/.bin/next ]] || { echo "web/node_modules 가 없습니다. 먼저 (cd web && npm install) 을 실행하세요."; exit 1; }
+ensure_node_on_path || { echo "node 를 찾을 수 없습니다. nvm 이라면 ~/.nvm/versions/node/*/bin 을 확인하세요."; exit 1; }
 if [[ ! -f web/.next/BUILD_ID ]]; then
   echo "빌드 결과가 없어 먼저 빌드합니다..."
   (cd web && ./node_modules/.bin/next build)

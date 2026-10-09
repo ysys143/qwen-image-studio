@@ -60,6 +60,40 @@ EOF
 
 fail() { printf '오류: %s\n' "$*" >&2; exit 1; }
 has_command() { command -v "$1" >/dev/null 2>&1; }
+
+# node 탐색. 비대화형 셸(SSH 원격 실행, cron, launchd)에는 nvm·homebrew 경로가 PATH 에 없다.
+# next 실행 파일은 `#!/usr/bin/env node` 셔뱅이라 PATH 에 node 가 없으면 그대로 실패한다.
+# 그래서 PATH 를 먼저 보정하고, 그래도 없으면 흔한 설치 위치를 직접 찾는다.
+ensure_node_on_path() {
+  if command -v node >/dev/null 2>&1; then return 0; fi
+  # nvm 을 쓴다면 사용자가 고른 기본 버전을 먼저 존중한다. 여러 개면 가장 높은 버전을 쓴다.
+  local nvm_root="$HOME/.nvm/versions/node"
+  local preferred="" picked="" candidate
+  if [[ -r "$HOME/.nvm/alias/default" ]]; then
+    preferred="$(<"$HOME/.nvm/alias/default")"
+    preferred="${preferred#v}"
+  fi
+  if [[ -n "$preferred" && -x "$nvm_root/v$preferred/bin/node" ]]; then
+    picked="$nvm_root/v$preferred/bin"
+  elif [[ -d "$nvm_root" ]]; then
+    picked="$(ls -d "$nvm_root"/*/bin 2>/dev/null | sort -V | tail -1)"
+  fi
+  for candidate in "$picked" /opt/homebrew/bin /usr/local/bin /usr/bin; do
+    if [[ -n "$candidate" && -x "$candidate/node" ]]; then
+      PATH="$candidate:$PATH"
+      export PATH
+      return 0
+    fi
+  done
+  return 1
+}
+
+# node 실행 파일의 절대 경로. PATH 에 없으면 설치 위치를 찾아 돌려준다.
+node_bin() {
+  ensure_node_on_path || return 1
+  node -p 'process.execPath'
+}
+
 http_code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$1" 2>/dev/null || true; }
 
 prepare_paths() {
@@ -242,6 +276,7 @@ start_tunnel() {
 
 start_services() {
   [[ "$(uname -s)" == "Darwin" ]] || fail "이 스크립트는 macOS용입니다."
+  ensure_node_on_path || fail "node 를 찾을 수 없습니다. nvm 이라면 ~/.nvm/versions/node/*/bin 을 확인하세요."
   for command_name in curl lsof launchctl node cloudflared nohup; do
     has_command "$command_name" || fail "$command_name 을 찾을 수 없습니다."
   done
@@ -314,7 +349,7 @@ stop_stale_listener() {
 }
 
 stop_services() {
-  NODE_BIN="$(command -v node >/dev/null 2>&1 && node -p 'process.execPath' || echo node)"
+  NODE_BIN="$(node_bin || echo node)"
   ensure_idle
   remove_legacy_agents
   stop_pid "$TUNNEL_PID_FILE" 'cloudflared tunnel'
