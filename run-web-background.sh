@@ -4,7 +4,7 @@
 # 사용법:
 #   ./run-web-background.sh                 # 백그라운드로 시작 (빌드 결과가 없으면 먼저 빌드)
 #   ./run-web-background.sh --status        # 실행 상태 확인
-#   ./run-web-background.sh --stop          # 서버 정지
+#   ./run-web-background.sh --stop          # 웹 앱과 ComfyUI 정지
 #   ./run-web-background.sh --stop --delete # 데이터(작업 기록·생성 이미지·참조 이미지)를 모두 지운 뒤 정지
 #
 # 로그는 web.log, PID 는 web/.web.pid 에 남는다.
@@ -71,6 +71,47 @@ fi
 listening_pid() { lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true; }
 alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
 
+# ComfyUI 는 이 스크립트가 직접 띄우지 않는다. 웹 앱이 COMFY_AUTOSTART 로 띄우거나
+# run-studio-services.sh 가 comfy.pid 로 따로 띄운다. PID 파일이 없을 수 있어 포트로도 찾는다.
+# 모델(수 GB)을 붙들고 있어 이걸 남기면 스왑이 풀리지 않는다.
+COMFY_PORT="${COMFY_PORT:-8188}"
+COMFY_PID_FILE="$HOME/Library/Application Support/Qwen Image Studio/comfy.pid"
+
+comfy_pids() {
+  local p
+  {
+    lsof -tiTCP:"$COMFY_PORT" -sTCP:LISTEN 2>/dev/null || true
+    if [[ -s "$COMFY_PID_FILE" ]]; then
+      p="$(cat "$COMFY_PID_FILE" 2>/dev/null || true)"
+      [[ "$p" =~ ^[0-9]+$ ]] && printf '%s\n' "$p"
+    fi
+  } | sed '/^$/d' | sort -u
+}
+
+stop_comfy() {
+  local -a cpids
+  cpids=(${(f)"$(comfy_pids)"})
+  if (( $#cpids == 0 )); then
+    rm -f "$COMFY_PID_FILE"
+    return 0
+  fi
+  echo "ComfyUI 를 정지합니다 (PID $cpids)..."
+  local p attempt remaining
+  for p in $cpids; do kill -TERM "$p" 2>/dev/null || true; done
+  for attempt in $(seq 1 15); do
+    remaining=0
+    for p in $cpids; do
+      if alive "$p"; then remaining=1; fi
+    done
+    (( remaining == 0 )) && break
+    sleep 1
+  done
+  for p in $cpids; do
+    if alive "$p"; then kill -KILL "$p" 2>/dev/null || true; fi
+  done
+  rm -f "$COMFY_PID_FILE"
+}
+
 show_status() {
   local pid; pid=$(listening_pid)
   if [[ -n "$pid" ]]; then
@@ -97,22 +138,24 @@ if (( STOP )); then
   if [[ -z "$PID" ]]; then
     echo "서버가 실행 중이 아닙니다."
     rm -f "$PID_FILE"
-    exit 0
+  else
+    echo "서버를 정지합니다 (PID $PID)..."
+    kill -TERM "$PID" 2>/dev/null || true
+    for _ in $(seq 1 15); do alive "$PID" || break; sleep 1; done
+    if alive "$PID"; then
+      echo "정상 종료되지 않아 강제로 끝냅니다."
+      kill -KILL "$PID" 2>/dev/null || true
+      sleep 1
+    fi
+    # 같은 포트를 듣는 다른 프로세스(옛 npm 래퍼 등)가 남았으면 함께 정리한다
+    LEFT=$(listening_pid)
+    if [[ -n "$LEFT" ]]; then kill -KILL "$LEFT" 2>/dev/null || true; fi
+    rm -f "$PID_FILE"
+    echo "정지했습니다."
   fi
 
-  echo "서버를 정지합니다 (PID $PID)..."
-  kill -TERM "$PID" 2>/dev/null || true
-  for _ in $(seq 1 15); do alive "$PID" || break; sleep 1; done
-  if alive "$PID"; then
-    echo "정상 종료되지 않아 강제로 끝냅니다."
-    kill -KILL "$PID" 2>/dev/null || true
-    sleep 1
-  fi
-  # 같은 포트를 듣는 다른 프로세스(옛 npm 래퍼 등)가 남았으면 함께 정리한다
-  LEFT=$(listening_pid)
-  if [[ -n "$LEFT" ]]; then kill -KILL "$LEFT" 2>/dev/null || true; fi
-  rm -f "$PID_FILE"
-  echo "정지했습니다."
+  # 웹 앱만 내리면 ComfyUI 가 모델을 붙들고 남아 스왑이 풀리지 않는다.
+  stop_comfy
   exit 0
 fi
 
