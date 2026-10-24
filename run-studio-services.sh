@@ -223,7 +223,9 @@ start_web() {
   ulimit -n 65536 2>/dev/null || true
   (
     cd "$ROOT_DIR/web"
-    COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}" COMFY_AUTOSTART="${COMFY_AUTOSTART:-0}" start_process web "$WEB_PID_FILE" "$next_cli" "$NODE_BIN" "$next_cli" start --port 3210
+    # NEXT_MANUAL_SIG_HANDLE=1 이 없으면 Next 가 SIGTERM 에 process.exit(143) 으로 즉시 끝나
+    # 종료 정리(shutdown.ts)의 ComfyUI 모델 반환 요청이 나가지 못한다.
+    COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}" COMFY_AUTOSTART="${COMFY_AUTOSTART:-0}" NEXT_MANUAL_SIG_HANDLE=1 start_process web "$WEB_PID_FILE" "$next_cli" "$NODE_BIN" "$next_cli" start --port 3210
   )
   for attempt in $(seq 1 45); do
     [[ "$(http_code "$BASE_URL/api/status")" == "200" ]] && return 0

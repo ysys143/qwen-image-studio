@@ -62,7 +62,10 @@ case "$MODE" in
   build) exec "$NEXT" build ;;
   start)
     [[ -f .next/BUILD_ID ]] || "$NEXT" build
-    exec "$NEXT" start --port "$PORT"
+    # Next 는 기본적으로 SIGTERM 을 직접 받아 process.exit(143) 으로 즉시 끝낸다.
+    # 그러면 종료 정리(shutdown.ts)의 ComfyUI 모델 반환 요청이 나가기 전에 프로세스가 죽는다.
+    # 우리 핸들러가 종료를 주도하게 해 모델 메모리를 반환한 뒤 끝낸다.
+    NEXT_MANUAL_SIG_HANDLE=1 exec "$NEXT" start --port "$PORT"
     ;;
   *) echo "알 수 없는 모드: $MODE (dev | build | start)"; exit 1 ;;
 esac
